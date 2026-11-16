@@ -54,7 +54,7 @@ final class EventWatch {
     /// Shows the system Accessibility prompt when this process is not trusted yet.
     func requestAccessibilityPrompt() {
         guard !AXIsProcessTrusted() else { return }
-        let key = kAXTrustedCheckOptionPrompt as String
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
@@ -119,6 +119,26 @@ final class EventWatch {
     }
 }
 
+/// Swift's `as? AXUIElement` does not check the CoreFoundation type id, so every CF value would pass.
+private func axElements(in value: CFTypeRef) -> [AXUIElement] {
+    let typeID = CFGetTypeID(value)
+    if typeID == AXUIElementGetTypeID() {
+        return [value as! AXUIElement]
+    }
+    guard typeID == CFArrayGetTypeID() else { return [] }
+    let array = value as! CFArray
+    let count = CFArrayGetCount(array)
+    var elements: [AXUIElement] = []
+    elements.reserveCapacity(count)
+    for index in 0..<count {
+        let pointer: UnsafeRawPointer = CFArrayGetValueAtIndex(array, index)
+        let item = Unmanaged<CFTypeRef>.fromOpaque(pointer).takeUnretainedValue()
+        guard CFGetTypeID(item) == AXUIElementGetTypeID() else { continue }
+        elements.append(item as! AXUIElement)
+    }
+    return elements
+}
+
 private func axObserverCallback(
     _ observer: AXObserver,
     _ element: AXUIElement,
@@ -160,16 +180,8 @@ private final class AppAXObserver {
     func subscribeToWindows() {
         var raw: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &raw)
-        guard error == .success else { return }
-        let windows: [AXUIElement]
-        if let typed = raw as? [AXUIElement] {
-            windows = typed
-        } else if let array = raw as? NSArray {
-            windows = array.compactMap { $0 as? AXUIElement }
-        } else {
-            return
-        }
-        for window in windows {
+        guard error == .success, let raw else { return }
+        for window in axElements(in: raw) {
             for name in Self.windowNotifications {
                 _ = AXObserverAddNotification(observer, window, name as CFString, nil)
             }
