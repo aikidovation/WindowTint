@@ -128,11 +128,11 @@ There is no default override and no default exclusion.
 
 ## App icon
 
-The bundle icon is original artwork: overlapping navy, green, and grey rounded rectangles on a dark rounded square (`Resources/AppIcon.icns`). It is not an SF Symbol. `build.sh` copies it into `Contents/Resources` before signing. The menu-bar item itself stays the system `square.on.square` symbol, drawn at runtime.
+The bundle icon is original artwork: overlapping navy, green, and grey rounded rectangles on a dark rounded square. It is not an SF Symbol. `Resources/AppIcon.icns` is not checked in. When that file is missing, `build.sh` runs `tools/make-icon.swift` and `iconutil`, then copies the icns into the app before signing. The menu-bar item itself stays the system `square.on.square` symbol, drawn at runtime.
 
 <img src="Resources/icon-1024.png" width="128" alt="WindowTint app icon">
 
-To regenerate the icon on a Mac, from `tools/`:
+The picture above is the committed preview, `Resources/icon-1024.png`. To regenerate the icon and that preview on a Mac:
 
 ```bash
 cd tools
@@ -142,7 +142,7 @@ cp AppIcon.icns ../Resources/AppIcon.icns
 cp icon-1024.png ../Resources/icon-1024.png
 ```
 
-`make-icon.swift` writes `AppIcon.iconset` and a 1024 px preview in the current directory. `iconutil` packs that iconset into `AppIcon.icns`. If `Resources/AppIcon.icns` is missing, `build.sh` runs those steps for you.
+`make-icon.swift` writes `AppIcon.iconset` and a 1024 px preview in the current directory. `iconutil` packs that iconset into `AppIcon.icns`. `build.sh` runs those steps for you when `Resources/AppIcon.icns` is absent.
 
 ## License
 

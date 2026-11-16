@@ -68,12 +68,13 @@ final class AppColor {
         var count = 0
         for y in 0..<16 {
             for x in 0..<16 {
-                guard let sample = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                // getHue writes its out-parameters and returns Void. The failable step is the sRGB conversion.
+                guard let sample = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
                 var hue: CGFloat = 0
                 var saturation: CGFloat = 0
                 var brightness: CGFloat = 0
                 var alpha: CGFloat = 0
-                guard sample.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha) else { continue }
+                sample.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
                 guard saturation > 0.25, alpha > 0.5 else { continue }
                 sumR += sample.redComponent * saturation
                 sumG += sample.greenComponent * saturation
@@ -89,26 +90,24 @@ final class AppColor {
 
     /// Pull an arbitrary icon average into a border that stays vivid on a dark desktop.
     private static func normalize(_ color: NSColor) -> NSColor {
-        guard let rgb = color.usingColorSpace(.deviceRGB) else { return color }
+        guard let rgb = color.usingColorSpace(.sRGB) else { return color }
         var hue: CGFloat = 0
         var saturation: CGFloat = 0
         var brightness: CGFloat = 0
         var alpha: CGFloat = 0
-        guard rgb.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha) else {
-            return hashedColor("fallback")
-        }
+        rgb.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
         let clampedSaturation = min(0.8, max(0.6, saturation))
         return NSColor(hue: hue, saturation: clampedSaturation, brightness: 0.75, alpha: 1)
     }
 
     /// Index 0 is the base color. Later windows alternate lighter and darker, with a small hue step.
     private static func shade(_ base: NSColor, index: Int) -> NSColor {
-        guard index > 0, let rgb = base.usingColorSpace(.deviceRGB) else { return base }
+        guard index > 0, let rgb = base.usingColorSpace(.sRGB) else { return base }
         var hue: CGFloat = 0
         var saturation: CGFloat = 0
         var brightness: CGFloat = 0
         var alpha: CGFloat = 0
-        guard rgb.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha) else { return base }
+        rgb.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
 
         let generation = index / 3
         let band = index % 3

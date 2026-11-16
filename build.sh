@@ -4,8 +4,9 @@
 set -e
 cd "$(dirname "$0")"
 
+# AppIcon.icns is produced here and is not checked in. iconutil is what makes a valid icns.
 if [[ ! -f Resources/AppIcon.icns ]]; then
-  echo "Resources/AppIcon.icns is missing; generating it."
+  echo "Resources/AppIcon.icns is missing; generating it with iconutil."
   (
     cd tools
     xcrun swift make-icon.swift
