@@ -34,7 +34,7 @@ Colors are cached per app. A `defaults` override replaces an app’s base color.
 
 - Each border stays on the Space where its window lives. It is shown only while that window is on screen. Switching Spaces does not move a border onto the Space you are leaving for.
 - Mission Control is best effort. A border is a separate window ordered just above its target, which is the relationship that can show up in a preview. There is no public API to draw inside another app's window, or to attach our window as a child of another process's window, so a preview can omit the border. Stage Manager thumbnails are separate snapshots and are not tinted.
-- While you drag or resize a window, its border hides until the frame has stayed still for about 150 ms. A window that just appeared waits the same way, so a Space animation does not flash a border in the wrong place. With Accessibility permission, other updates are coalesced to about 20 per second. Without it, a timer refreshes about 4 times a second.
+- While you drag or resize a window, its border hides until the frame has stayed still for about 150 ms. A window that just appeared waits the same way, so a Space animation does not flash a border in the wrong place. With Accessibility permission, other updates are coalesced to about 20 per second. Without it, a timer refreshes about twice a second.
 - Full-screen apps are tinted only when the window is a normal on-screen window and the border is allowed onto that space. The transition into full screen can lag by one refresh.
 - The corner radius is a fixed 12 points. It will not match every window, especially very small ones or windows with a different corner.
 - Windows smaller than 100×60 points, fully transparent windows, and this app’s own windows are skipped. Minimized windows are off screen, so they are not tinted until they come back.
@@ -132,7 +132,7 @@ To log every refresh to `~/Library/Logs/WindowTint.log`:
 defaults write com.aikidovation.WindowTint DebugLog -bool true
 ```
 
-Each refresh records what triggered it, how many on-screen windows WindowTint is considering, and for each one the window id, process id, bundle id, Quartz frame, whether the border was created, shown, or hidden, and the border color. Set the key back to false to stop. The file is appended on the next refresh; you do not need to relaunch.
+A line is written when the on-screen windows, frames, colors, or stacking order change. The line includes what triggered that change, how many on-screen windows WindowTint is considering, the back-to-front window ids, and for each window the id, process id, bundle id, Quartz frame, whether the border was created, shown, or hidden, and the border color. Identical timer ticks are not logged. Set the key back to false to stop. You do not need to relaunch.
 
 There is no default override and no default exclusion.
 

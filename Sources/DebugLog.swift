@@ -14,10 +14,11 @@ enum DebugLog {
 
     private static let queue = DispatchQueue(label: "com.aikidovation.WindowTint.log")
 
-    static func write(trigger: String, onScreen: Int, rows: [Row]) {
+    static func write(trigger: String, onScreen: Int, zOrder: [Int], rows: [Row]) {
         guard UserDefaults.standard.bool(forKey: "DebugLog") else { return }
         let stamp = ISO8601DateFormatter().string(from: Date())
-        var lines = ["\(stamp) trigger=\(trigger) onScreen=\(onScreen)"]
+        let order = zOrder.map(String.init).joined(separator: ",")
+        var lines = ["\(stamp) trigger=\(trigger) onScreen=\(onScreen) z=\(order)"]
         for row in rows {
             let frame = row.frame
             lines.append(

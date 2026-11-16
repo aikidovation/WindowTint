@@ -23,7 +23,7 @@ final class OverlayController {
         }
         guard settings.isEnabled else {
             orderOutAll()
-            log(trigger: trigger, windows: windows, rows: [])
+            logIfChanged(trigger: trigger, onScreen: windows.count, rows: [], zOrder: [])
             return counts
         }
         guard let primaryHeight = Self.primaryScreenHeight() else { return counts }
@@ -32,12 +32,7 @@ final class OverlayController {
         let borderWidth = settings.borderWidth
         let showsTint = settings.tintEnabled
         let now = Date()
-        let onScreen = Set(windows.map(\.windowNumber))
-        for (number, overlay) in overlays where !onScreen.contains(number) {
-            overlay.hide()
-        }
-
-        var placed: [(number: Int, frame: NSRect, color: NSColor)] = []
+        var shown: [Desired] = []
         var rows: [DebugLog.Row] = []
         var waitingForStable = false
 
@@ -59,9 +54,9 @@ final class OverlayController {
                 icon: app?.icon,
                 overrideHex: app?.bundleIdentifier.flatMap { settings.overrideHex(for: $0) }
             )
-            if skip || moving || unsettled {
-                overlays[window.windowNumber]?.hide()
-                if !skip && (moving || unsettled) { waitingForStable = true }
+            let visible = !skip && !moving && !unsettled
+            if !skip && (moving || unsettled) { waitingForStable = true }
+            if !visible {
                 rows.append(DebugLog.Row(
                     windowID: window.windowNumber, pid: window.pid, bundleID: bundleID,
                     frame: window.bounds, state: "hidden", color: color.hexRGB
@@ -69,29 +64,87 @@ final class OverlayController {
                 continue
             }
             lastMovedAt.removeValue(forKey: window.windowNumber)
-            let created = overlays[window.windowNumber] == nil
             let frame = Self.cocoaFrame(fromQuartz: window.bounds, primaryHeight: primaryHeight)
-            placed.append((window.windowNumber, frame, color))
+            shown.append(Desired(windowID: window.windowNumber, frame: frame, color: color, colorHex: color.hexRGB))
             rows.append(DebugLog.Row(
                 windowID: window.windowNumber, pid: window.pid, bundleID: bundleID,
-                frame: window.bounds, state: created ? "created" : "shown", color: color.hexRGB
+                frame: window.bounds,
+                state: placement[window.windowNumber]?.shown == true ? "shown" : "created",
+                color: color.hexRGB
             ))
         }
 
-        // Back to front, so each border is ordered just above its own window.
-        // That is the relationship Mission Control sometimes captures; every on-screen window gets it.
-        for item in placed.reversed() {
-            let overlay = overlays[item.number] ?? makeOverlay(number: item.number)
-            overlay.update(frame: item.frame, color: item.color, borderWidth: borderWidth, showsTint: showsTint)
-            overlay.orderAboveOwner()
-        }
+        // Window list is front to back. Ordering back to front puts each border just above its window.
+        let zOrder = Array(shown.reversed())
+        apply(zOrder: zOrder, borderWidth: borderWidth, showsTint: showsTint)
         if waitingForStable { armStabilityCheck() }
-        log(trigger: trigger, windows: windows, rows: rows)
+        logIfChanged(trigger: trigger, onScreen: windows.count, rows: rows, zOrder: zOrder.map(\.windowID))
         return counts
     }
 
-    private func log(trigger: String, windows: [WindowRecord], rows: [DebugLog.Row]) {
-        DebugLog.write(trigger: trigger, onScreen: windows.count, rows: rows)
+    /// Last AppKit state. Refresh does nothing when the desired frame, visibility, and z-order match this.
+    private struct Placement {
+        var shown: Bool
+        var frame: NSRect
+        var colorHex: String
+        var borderWidth: CGFloat
+        var showsTint: Bool
+    }
+
+    private struct Desired {
+        var windowID: Int
+        var frame: NSRect
+        var color: NSColor
+        var colorHex: String
+    }
+
+    private var placement: [Int: Placement] = [:]
+    private var appliedOrder: [Int] = []
+    private var lastLogKey: String?
+
+    private func apply(zOrder: [Desired], borderWidth: CGFloat, showsTint: Bool) {
+        let shownIDs = Set(zOrder.map(\.windowID))
+        for id in Array(placement.keys) where !shownIDs.contains(id) {
+            guard var place = placement[id], place.shown else { continue }
+            overlays[id]?.hide()
+            place.shown = false
+            placement[id] = place
+        }
+        for (index, item) in zOrder.enumerated() {
+            let overlay = overlays[item.windowID] ?? makeOverlay(number: item.windowID)
+            let previous = placement[item.windowID]
+            if previous == nil || !Self.sameFrame(previous!.frame, item.frame) {
+                overlay.setFrame(item.frame)
+            }
+            if previous == nil
+                || previous!.colorHex != item.colorHex
+                || previous!.borderWidth != borderWidth
+                || previous!.showsTint != showsTint {
+                overlay.applyStyle(color: item.color, borderWidth: borderWidth, showsTint: showsTint)
+            }
+            let zChanged = appliedOrder.firstIndex(of: item.windowID) != index || previous?.shown != true
+            if zChanged {
+                overlay.orderAboveOwner()
+            }
+            placement[item.windowID] = Placement(
+                shown: true,
+                frame: previous != nil && Self.sameFrame(previous!.frame, item.frame) ? previous!.frame : item.frame,
+                colorHex: item.colorHex,
+                borderWidth: borderWidth,
+                showsTint: showsTint
+            )
+        }
+        appliedOrder = zOrder.map(\.windowID)
+    }
+
+    private func logIfChanged(trigger: String, onScreen: Int, rows: [DebugLog.Row], zOrder: [Int]) {
+        let key = zOrder.map(String.init).joined(separator: ",") + "|" + rows.map { row in
+            let frame = row.frame
+            return "\(row.windowID):\(row.state):\(row.color):\(Int(frame.origin.x)),\(Int(frame.origin.y)),\(Int(frame.width))x\(Int(frame.height))"
+        }.joined(separator: ";")
+        guard key != lastLogKey else { return }
+        lastLogKey = key
+        DebugLog.write(trigger: trigger, onScreen: onScreen, zOrder: zOrder, rows: rows)
     }
 
     private func armStabilityCheck() {
@@ -110,7 +163,20 @@ final class OverlayController {
     }
 
     private func orderOutAll() {
-        for overlay in overlays.values { overlay.hide() }
+        for (id, overlay) in overlays {
+            guard var place = placement[id], place.shown else { continue }
+            overlay.hide()
+            place.shown = false
+            placement[id] = place
+        }
+        appliedOrder = []
+    }
+
+    private static func sameFrame(_ a: NSRect, _ b: NSRect) -> Bool {
+        abs(a.origin.x - b.origin.x) < 0.5
+            && abs(a.origin.y - b.origin.y) < 0.5
+            && abs(a.size.width - b.size.width) < 0.5
+            && abs(a.size.height - b.size.height) < 0.5
     }
 
     private static func framesDiffer(_ a: CGRect, _ b: CGRect) -> Bool {
@@ -171,10 +237,11 @@ private final class Overlay {
         self.border = border
     }
 
-    func update(frame: NSRect, color: NSColor, borderWidth: CGFloat, showsTint: Bool) {
-        if !Self.nearlyEqual(window.frame, frame) {
-            window.setFrame(frame, display: false, animate: false)
-        }
+    func setFrame(_ frame: NSRect) {
+        window.setFrame(frame, display: false, animate: false)
+    }
+
+    func applyStyle(color: NSColor, borderWidth: CGFloat, showsTint: Bool) {
         border.apply(color: color, width: borderWidth, tint: showsTint)
     }
 
@@ -184,13 +251,6 @@ private final class Overlay {
 
     func hide() {
         window.orderOut(nil)
-    }
-
-    private static func nearlyEqual(_ a: NSRect, _ b: NSRect) -> Bool {
-        abs(a.origin.x - b.origin.x) < 0.5
-            && abs(a.origin.y - b.origin.y) < 0.5
-            && abs(a.size.width - b.size.width) < 0.5
-            && abs(a.size.height - b.size.height) < 0.5
     }
 }
 

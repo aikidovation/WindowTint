@@ -1,7 +1,7 @@
 import AppKit
 import ApplicationServices
 
-/// Accessibility observers, workspace notifications, and a ~4 Hz timer. All of them
+/// Accessibility observers, workspace notifications, and a ~2 Hz timer. All of them
 /// schedule one coalesced refresh. Without Accessibility permission, only the timer runs.
 final class EventWatch {
     var onRefresh: ((String) -> Void)?
@@ -41,10 +41,10 @@ final class EventWatch {
             self?.onRefresh?("space")
         }
         notificationTokens.append(spaceToken)
-        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.schedule("timer")
         }
-        timer.tolerance = 0.05
+        timer.tolerance = 0.1
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
         schedule("start")
