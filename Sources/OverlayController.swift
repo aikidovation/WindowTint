@@ -7,28 +7,37 @@ final class OverlayController {
 
     private var overlays: [Int: Overlay] = [:]
     private let colors = AppColor()
+    private let identity = AppIdentity()
     private var previousBounds: [Int: CGRect] = [:]
     private var lastMovedAt: [Int: Date] = [:]
     private var stableWork: DispatchWorkItem?
+    private var missionActive = false
+    private var missionQuietSince: Date?
     private static let stableDelay: TimeInterval = 0.15
+    private static let missionExitDelay: TimeInterval = 0.30
 
     /// Places borders for on-screen windows and orders the others out without destroying them.
     /// An overlay is created only when its target is on screen and its frame has settled, so the
     /// first `order(.above, relativeTo:)` joins the target's Space. The same window is ordered
     /// back in when that target returns.
     func refresh(windows: [WindowRecord], settings: Settings, trigger: String) -> [pid_t: Int] {
-        var counts: [pid_t: Int] = [:]
-        for window in windows {
-            counts[window.pid, default: 0] += 1
-        }
         guard settings.isEnabled else {
             orderOutAll()
             logIfChanged(trigger: trigger, onScreen: windows.count, rows: [], zOrder: [])
-            return counts
+            return [:]
         }
-        guard let primaryHeight = Self.primaryScreenHeight() else { return counts }
+        guard let primaryHeight = Self.primaryScreenHeight() else { return [:] }
 
         let excluded = settings.excludedBundleIDs
+        if freezeForMissionControl(windows, excluded: excluded, trigger: trigger) {
+            var countsDuringFreeze: [pid_t: Int] = [:]
+            for item in trackable(windows, excluded: excluded) {
+                countsDuringFreeze[item.pid, default: 0] += 1
+            }
+            return countsDuringFreeze
+        }
+
+        var counts: [pid_t: Int] = [:]
         let borderWidth = settings.borderWidth
         let showsTint = settings.tintEnabled
         let now = Date()
@@ -36,11 +45,9 @@ final class OverlayController {
         var rows: [DebugLog.Row] = []
         var waitingForStable = false
 
-        for window in windows {
-            let app = NSRunningApplication(processIdentifier: window.pid)
-            let bundleID = app?.bundleIdentifier ?? "pid:\(window.pid)"
-            let skip = app?.bundleIdentifier == Bundle.main.bundleIdentifier
-                || (app?.bundleIdentifier).map { excluded.contains($0) } == true
+        for window in windows where window.layer == 0 && window.bounds.width >= 100 && window.bounds.height >= 60 {
+            guard let bundleID = identity.trackableBundleID(for: window.pid, excluded: excluded) else { continue }
+            counts[window.pid, default: 0] += 1
             let known = previousBounds[window.windowNumber]
             // No stored frame means this window just appeared. Wait until the frame holds still
             // so a Space animation cannot flash a border in the wrong place.
@@ -48,14 +55,15 @@ final class OverlayController {
             previousBounds[window.windowNumber] = window.bounds
             if moving { lastMovedAt[window.windowNumber] = now }
             let unsettled = lastMovedAt[window.windowNumber].map { now.timeIntervalSince($0) < Self.stableDelay } ?? false
+            let app = NSRunningApplication(processIdentifier: window.pid)
             let color = colors.color(
                 bundleID: bundleID,
                 windowNumber: window.windowNumber,
                 icon: app?.icon,
-                overrideHex: app?.bundleIdentifier.flatMap { settings.overrideHex(for: $0) }
+                overrideHex: settings.overrideHex(for: bundleID)
             )
-            let visible = !skip && !moving && !unsettled
-            if !skip && (moving || unsettled) { waitingForStable = true }
+            let visible = !moving && !unsettled
+            if moving || unsettled { waitingForStable = true }
             if !visible {
                 rows.append(DebugLog.Row(
                     windowID: window.windowNumber, pid: window.pid, bundleID: bundleID,
@@ -78,8 +86,130 @@ final class OverlayController {
         let zOrder = Array(shown.reversed())
         apply(zOrder: zOrder, borderWidth: borderWidth, showsTint: showsTint)
         if waitingForStable { armStabilityCheck() }
-        logIfChanged(trigger: trigger, onScreen: windows.count, rows: rows, zOrder: zOrder.map(\.windowID))
+        logIfChanged(trigger: trigger, onScreen: rows.count, rows: rows, zOrder: zOrder.map(\.windowID))
         return counts
+    }
+
+    /// Mission Control reports scaled, moving preview frames. Touching overlays in response
+    /// makes those previews re-layout forever. While it is active, leave every overlay as it is.
+    private func freezeForMissionControl(_ windows: [WindowRecord], excluded: Set<String>, trigger: String) -> Bool {
+        let detected = missionDetected(windows, excluded: excluded)
+        let framesChanging = trackedFramesChanging(windows, excluded: excluded)
+        let wasActive = missionActive
+        if detected.reasons.isEmpty {
+            guard missionActive else { return false }
+            if framesChanging {
+                missionQuietSince = Date()
+                return true
+            }
+            if missionQuietSince == nil { missionQuietSince = Date() }
+            if Date().timeIntervalSince(missionQuietSince!) < Self.missionExitDelay {
+                return true
+            }
+            missionActive = false
+            missionQuietSince = nil
+            logMissionControl(entering: false, reason: "frames-stable", windows: windows, trigger: trigger)
+            return false
+        }
+        missionActive = true
+        missionQuietSince = nil
+        if !wasActive {
+            logMissionControl(entering: true, reason: detected.reasons.joined(separator: "+"), windows: windows, trigger: trigger)
+        }
+        return true
+    }
+
+    private struct MissionHit {
+        var reasons: [String]
+    }
+
+    private func missionDetected(_ windows: [WindowRecord], excluded: Set<String>) -> MissionHit {
+        var reasons: [String] = []
+        if dockCoversScreen(windows) { reasons.append("dock-cover") }
+        if windowManagerLayerZero(windows) { reasons.append("window-manager") }
+        if uniformScale(windows, excluded: excluded) { reasons.append("uniform-scale") }
+        return MissionHit(reasons: reasons)
+    }
+
+    private func dockCoversScreen(_ windows: [WindowRecord]) -> Bool {
+        windows.contains { window in
+            window.layer > 0
+                && identity.bundleID(for: window.pid) == AppIdentity.dockBundleID
+                && coversWholeScreen(window.bounds)
+        }
+    }
+
+    private func windowManagerLayerZero(_ windows: [WindowRecord]) -> Bool {
+        windows.contains { window in
+            window.layer == 0
+                && window.bounds.width >= 100
+                && window.bounds.height >= 60
+                && identity.bundleID(for: window.pid) == AppIdentity.windowManagerBundleID
+        }
+    }
+
+    /// Several already-tracked windows resized by the same factor in this tick.
+    private func uniformScale(_ windows: [WindowRecord], excluded: Set<String>) -> Bool {
+        var scales: [CGFloat] = []
+        for window in windows where window.layer == 0 {
+            guard identity.trackableBundleID(for: window.pid, excluded: excluded) != nil else { continue }
+            guard let old = previousBounds[window.windowNumber], old.width > 20, old.height > 20 else { continue }
+            let widthChanged = abs(window.bounds.width - old.width) > 1
+            let heightChanged = abs(window.bounds.height - old.height) > 1
+            guard widthChanged || heightChanged else { continue }
+            let scaleX = window.bounds.width / old.width
+            let scaleY = window.bounds.height / old.height
+            guard abs(scaleX - scaleY) < 0.08 else { continue }
+            scales.append(scaleX)
+        }
+        guard scales.count >= 2 else { return false }
+        let mean = scales.reduce(0, +) / CGFloat(scales.count)
+        return scales.allSatisfy { abs($0 - mean) < 0.06 }
+    }
+
+    private func trackedFramesChanging(_ windows: [WindowRecord], excluded: Set<String>) -> Bool {
+        for window in windows where window.layer == 0 {
+            guard identity.trackableBundleID(for: window.pid, excluded: excluded) != nil else { continue }
+            guard let old = previousBounds[window.windowNumber] else { continue }
+            if Self.framesDiffer(old, window.bounds) { return true }
+        }
+        return false
+    }
+
+    private func coversWholeScreen(_ bounds: CGRect) -> Bool {
+        NSScreen.screens.contains { screen in
+            let size = screen.frame.size
+            return bounds.width >= size.width * 0.85 && bounds.height >= size.height * 0.85
+        }
+    }
+
+    private func trackable(_ windows: [WindowRecord], excluded: Set<String>) -> [WindowRecord] {
+        windows.filter { window in
+            window.layer == 0
+                && window.bounds.width >= 100
+                && window.bounds.height >= 60
+                && identity.trackableBundleID(for: window.pid, excluded: excluded) != nil
+        }
+    }
+
+    private func logMissionControl(entering: Bool, reason: String, windows: [WindowRecord], trigger: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        var lines = ["\(stamp) mission-control \(entering ? "enter" : "exit") reason=\(reason) trigger=\(trigger)"]
+        for window in windows where window.layer != 0 {
+            let bundle = identity.bundleID(for: window.pid) ?? "?"
+            let frame = window.bounds
+            lines.append(
+                "  layer=\(window.layer) pid=\(window.pid) bundle=\(bundle) " +
+                "bounds=\(Int(frame.origin.x)),\(Int(frame.origin.y)),\(Int(frame.width))x\(Int(frame.height))"
+            )
+        }
+        let layerZeroManager = windows.filter {
+            $0.layer == 0 && identity.bundleID(for: $0.pid) == AppIdentity.windowManagerBundleID
+        }
+        if !layerZeroManager.isEmpty {
+            lines.append("  window-manager-layer0=\(layerZeroManager.count)")
+        }
+        DebugLog.writeRaw(lines.joined(separator: "\n"))
     }
 
     /// Last AppKit state. Refresh does nothing when the desired frame, visibility, and z-order match this.

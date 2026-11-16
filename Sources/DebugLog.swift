@@ -14,6 +14,13 @@ enum DebugLog {
 
     private static let queue = DispatchQueue(label: "com.aikidovation.WindowTint.log")
 
+    /// Used for Mission Control enter/exit. Not deduped by the refresh state key.
+    static func writeRaw(_ text: String) {
+        guard UserDefaults.standard.bool(forKey: "DebugLog") else { return }
+        let body = text.hasSuffix("\n") ? text : text + "\n"
+        queue.async { append(body) }
+    }
+
     static func write(trigger: String, onScreen: Int, zOrder: [Int], rows: [Row]) {
         guard UserDefaults.standard.bool(forKey: "DebugLog") else { return }
         let stamp = ISO8601DateFormatter().string(from: Date())
