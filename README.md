@@ -33,7 +33,8 @@ Colors are cached per app. A `defaults` override replaces an app’s base color.
 ## Limits
 
 - Mission Control previews are not tinted. They are snapshots, not the live windows. Stage Manager thumbnails are the same.
-- While you drag a window, the border can trail it by a fraction of a second. With Accessibility permission, updates are coalesced to about 20 per second. Without it, a timer refreshes about 4 times a second.
+- Switching Spaces hides every border at once. They are drawn again about a third of a second after the switch settles, and only for windows on the current Space.
+- While you drag or resize a window, its border hides until the frame has stayed still for about 150 ms. With Accessibility permission, other updates are coalesced to about 20 per second. Without it, a timer refreshes about 4 times a second.
 - Full-screen apps are tinted only when the window is a normal on-screen window and the border is allowed onto that space. The transition into full screen can lag by one refresh.
 - The corner radius is a fixed 12 points. It will not match every window, especially very small ones or windows with a different corner.
 - Windows smaller than 100×60 points, fully transparent windows, and this app’s own windows are skipped. Minimized windows are off screen, so they are not tinted until they come back.

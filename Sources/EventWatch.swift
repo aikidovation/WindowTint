@@ -5,6 +5,8 @@ import ApplicationServices
 /// schedule one coalesced refresh. Without Accessibility permission, only the timer runs.
 final class EventWatch {
     var onRefresh: (() -> Void)?
+    /// Space switches are not a normal refresh. The app hides every border, then rebuilds after the animation settles.
+    var onSpaceChange: (() -> Void)?
     private var observers: [pid_t: AppAXObserver] = [:]
     private var timer: Timer?
     private var pending = false
@@ -25,7 +27,6 @@ final class EventWatch {
             NSWorkspace.didActivateApplicationNotification,
             NSWorkspace.didLaunchApplicationNotification,
             NSWorkspace.didTerminateApplicationNotification,
-            NSWorkspace.activeSpaceDidChangeNotification,
         ]
         for name in names {
             // The returned token is the observer. Releasing it removes the notification.
@@ -34,6 +35,14 @@ final class EventWatch {
             }
             notificationTokens.append(token)
         }
+        let spaceToken = center.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.onSpaceChange?()
+        }
+        notificationTokens.append(spaceToken)
         let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             self?.schedule()
         }

@@ -16,6 +16,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var loginItem: NSMenuItem!
     private var accessItem: NSMenuItem!
     private var borderItems: [NSMenuItem] = []
+    private var baselineWindowIDs: Set<Int> = []
+    private var settlingSpace = false
+    private var spaceSettle: DispatchWorkItem?
 
     static func main() {
         let app = NSApplication.shared
@@ -28,14 +31,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         watch.onRefresh = { [weak self] in
             self?.refresh()
         }
+        watch.onSpaceChange = { [weak self] in
+            self?.beginSpaceSettle()
+        }
+        overlays.onNeedsRefresh = { [weak self] in
+            self?.refresh()
+        }
         watch.requestAccessibilityPrompt()
         watch.start()
     }
 
     private func refresh() {
         let windows = WindowList.copyOnScreen()
+        let ids = Set(windows.map(\.windowNumber))
+        // A Space switch replaces most of the on-screen set even if the notification is late.
+        if isWholesaleChange(from: baselineWindowIDs, to: ids) {
+            baselineWindowIDs = ids
+            beginSpaceSettle()
+            watch.note(windowCounts: pidCounts(windows))
+            return
+        }
+        if settlingSpace {
+            watch.note(windowCounts: pidCounts(windows))
+            return
+        }
+        baselineWindowIDs = ids
         let counts = overlays.refresh(windows: windows, settings: settings)
         watch.note(windowCounts: counts)
+    }
+
+    /// Hides every border immediately, then draws the current Space again once the animation has been quiet for 0.35 s.
+    private func beginSpaceSettle() {
+        settlingSpace = true
+        overlays.hideAll()
+        spaceSettle?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.finishSpaceSettle()
+        }
+        spaceSettle = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    private func finishSpaceSettle() {
+        settlingSpace = false
+        spaceSettle = nil
+        let windows = WindowList.copyOnScreen()
+        baselineWindowIDs = Set(windows.map(\.windowNumber))
+        let counts = overlays.refresh(windows: windows, settings: settings)
+        watch.note(windowCounts: counts)
+    }
+
+    private func isWholesaleChange(from previous: Set<Int>, to current: Set<Int>) -> Bool {
+        guard !previous.isEmpty else { return false }
+        let kept = previous.intersection(current).count
+        return kept * 2 < previous.count
+    }
+
+    private func pidCounts(_ windows: [WindowRecord]) -> [pid_t: Int] {
+        var counts: [pid_t: Int] = [:]
+        for window in windows {
+            counts[window.pid, default: 0] += 1
+        }
+        return counts
     }
 
     private func setupStatusItem() {

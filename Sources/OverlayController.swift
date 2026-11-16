@@ -2,11 +2,29 @@ import AppKit
 
 /// One click-through border (and optional tint) per target window, keyed by window number.
 final class OverlayController {
+    /// Fired about 150 ms after a window's frame stops changing, so a hidden border can come back.
+    var onNeedsRefresh: (() -> Void)?
+
     private var overlays: [Int: Overlay] = [:]
     private let colors = AppColor()
+    private var previousBounds: [Int: CGRect] = [:]
+    private var lastMovedAt: [Int: Date] = [:]
+    private var stableWork: DispatchWorkItem?
+    private static let stableDelay: TimeInterval = 0.15
+
+    /// Drops every border. The next refresh creates new ones on the Space that is current then.
+    func hideAll() {
+        stableWork?.cancel()
+        stableWork = nil
+        for overlay in overlays.values { overlay.hide() }
+        overlays.removeAll()
+        previousBounds.removeAll()
+        lastMovedAt.removeAll()
+    }
 
     /// Places borders for `windows` (front to back). Returns how many listed windows each pid owns,
     /// including ones skipped for exclusion, so accessibility subscriptions can track opens and closes.
+    /// `windows` must already be the on-screen list for the current Space.
     func refresh(windows: [WindowRecord], settings: Settings) -> [pid_t: Int] {
         var counts: [pid_t: Int] = [:]
         for window in windows {
@@ -21,13 +39,27 @@ final class OverlayController {
         let excluded = settings.excludedBundleIDs
         let borderWidth = settings.borderWidth
         let showsTint = settings.tintEnabled
-        var live = Set<Int>()
+        let now = Date()
+        var keep = Set<Int>()
         var placed: [(number: Int, frame: NSRect, color: NSColor)] = []
+        var waitingForStable = false
 
         for window in windows {
             let app = NSRunningApplication(processIdentifier: window.pid)
             if let bundleID = app?.bundleIdentifier, bundleID == Bundle.main.bundleIdentifier { continue }
             if let bundleID = app?.bundleIdentifier, excluded.contains(bundleID) { continue }
+            let moving = previousBounds[window.windowNumber].map { Self.framesDiffer($0, window.bounds) } ?? false
+            previousBounds[window.windowNumber] = window.bounds
+            if moving { lastMovedAt[window.windowNumber] = now }
+            let movedAt = lastMovedAt[window.windowNumber]
+            let unstable = movedAt.map { now.timeIntervalSince($0) < Self.stableDelay } ?? false
+            if moving || unstable {
+                overlays[window.windowNumber]?.hide()
+                if overlays[window.windowNumber] != nil { keep.insert(window.windowNumber) }
+                waitingForStable = true
+                continue
+            }
+            lastMovedAt.removeValue(forKey: window.windowNumber)
             let frame = Self.cocoaFrame(fromQuartz: window.bounds, primaryHeight: primaryHeight)
             let bundleID = app?.bundleIdentifier ?? "pid:\(window.pid)"
             let color = colors.color(
@@ -36,11 +68,15 @@ final class OverlayController {
                 icon: app?.icon,
                 overrideHex: app?.bundleIdentifier.flatMap { settings.overrideHex(for: $0) }
             )
-            live.insert(window.windowNumber)
+            keep.insert(window.windowNumber)
             placed.append((window.windowNumber, frame, color))
         }
 
-        for number in Array(overlays.keys) where !live.contains(number) {
+        let seen = Set(windows.map(\.windowNumber))
+        previousBounds = previousBounds.filter { seen.contains($0.key) }
+        lastMovedAt = lastMovedAt.filter { seen.contains($0.key) }
+
+        for number in Array(overlays.keys) where !keep.contains(number) {
             overlays[number]?.hide()
             overlays.removeValue(forKey: number)
         }
@@ -52,7 +88,17 @@ final class OverlayController {
             overlay.update(frame: item.frame, color: item.color, borderWidth: borderWidth, showsTint: showsTint)
             overlay.orderAboveOwner()
         }
+        if waitingForStable { armStabilityCheck() }
         return counts
+    }
+
+    private func armStabilityCheck() {
+        stableWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.onNeedsRefresh?()
+        }
+        stableWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.stableDelay, execute: work)
     }
 
     private func makeOverlay(number: Int) -> Overlay {
@@ -62,8 +108,14 @@ final class OverlayController {
     }
 
     private func removeAll() {
-        for overlay in overlays.values { overlay.hide() }
-        overlays.removeAll()
+        hideAll()
+    }
+
+    private static func framesDiffer(_ a: CGRect, _ b: CGRect) -> Bool {
+        abs(a.origin.x - b.origin.x) > 1
+            || abs(a.origin.y - b.origin.y) > 1
+            || abs(a.size.width - b.size.width) > 1
+            || abs(a.size.height - b.size.height) > 1
     }
 
     /// Primary display height. Quartz y is measured from the top of that display; Cocoa y from its bottom.
@@ -102,11 +154,10 @@ private final class Overlay {
         window.hasShadow = false
         window.ignoresMouseEvents = true
         window.level = .normal
-        // `.canJoinAllSpaces` would paint the border on spaces that do not contain the window.
-        // `.moveToActiveSpace` would drag it onto the active space every time we re-order.
-        // `.stationary` keeps Mission Control from treating the border as a document window.
+        // Not `.canJoinAllSpaces` or `.stationary`: those stay visible across Spaces while the
+        // windows slide away. `.transient` keeps the border on the Space where it was created.
         // `.ignoresCycle` leaves it out of Cmd-`. `.fullScreenAuxiliary` shares a full-screen space.
-        window.collectionBehavior = [.stationary, .ignoresCycle, .fullScreenAuxiliary]
+        window.collectionBehavior = [.ignoresCycle, .fullScreenAuxiliary, .transient]
         window.hidesOnDeactivate = false
         window.isExcludedFromWindowsMenu = true
         window.animationBehavior = .none

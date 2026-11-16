@@ -12,11 +12,12 @@ struct WindowRecord {
 enum WindowList {
     /// Normal on-screen windows, excluding this process. Does not read `kCGWindowName`
     /// (that key is what asks for Screen Recording permission).
+    /// On-screen windows are the ones on the current Space. Windows on other Spaces are not included.
     static func copyOnScreen() -> [WindowRecord] {
         guard let list = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
             kCGNullWindowID
-        ) as? NSArray else { return [] }
+        ) as NSArray? else { return [] }
 
         let ownPID = ProcessInfo.processInfo.processIdentifier
         var records: [WindowRecord] = []
