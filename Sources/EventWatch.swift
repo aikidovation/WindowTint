@@ -47,7 +47,7 @@ final class EventWatch {
         timer.tolerance = 0.05
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
-        schedule()
+        schedule("start")
     }
 
     deinit {
