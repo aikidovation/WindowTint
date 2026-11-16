@@ -3,7 +3,8 @@ import AppKit
 /// Icon color for a bundle, plus a stable per-window shade.
 final class AppColor {
     private var baseByBundle: [String: NSColor] = [:]
-    private var indexByWindow: [Int: Int] = [:]
+    /// Keyed by bundle id and window number, so the shade is a function of those two and does not follow a recycled id onto another app.
+    private var indexByBundleWindow: [String: Int] = [:]
     private var nextIndexByBundle: [String: Int] = [:]
 
     func color(bundleID: String, windowNumber: Int, icon: NSImage?, overrideHex: String?) -> NSColor {
@@ -11,13 +12,12 @@ final class AppColor {
         return Self.shade(base, index: shadeIndex(bundleID: bundleID, windowNumber: windowNumber))
     }
 
-    /// Assigned the first time a window number is seen. Frontmost windows are visited first,
-    /// so the front window of an app tends to keep the base color. The number stays put for
-    /// the rest of the session so later windows don't reshuffle existing shades.
+    /// First window seen for a bundle is index 0. Later windows of that same bundle get the next index, and keep it.
     private func shadeIndex(bundleID: String, windowNumber: Int) -> Int {
-        if let existing = indexByWindow[windowNumber] { return existing }
+        let key = "\(bundleID)\t\(windowNumber)"
+        if let existing = indexByBundleWindow[key] { return existing }
         let next = nextIndexByBundle[bundleID] ?? 0
-        indexByWindow[windowNumber] = next
+        indexByBundleWindow[key] = next
         nextIndexByBundle[bundleID] = next + 1
         return next
     }
@@ -100,37 +100,17 @@ final class AppColor {
         return NSColor(hue: hue, saturation: clampedSaturation, brightness: 0.75, alpha: 1)
     }
 
-    /// Index 0 is the base color. Later windows alternate lighter and darker, with a small hue step.
+    /// Hue stays the app's hue. Index 0 is the base brightness; later windows move only about 8–12%.
     private static func shade(_ base: NSColor, index: Int) -> NSColor {
-        guard index > 0, let rgb = base.usingColorSpace(.sRGB) else { return base }
+        guard let rgb = base.usingColorSpace(.sRGB) else { return base }
         var hue: CGFloat = 0
         var saturation: CGFloat = 0
         var brightness: CGFloat = 0
         var alpha: CGFloat = 0
         rgb.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
-
-        let generation = index / 3
-        let band = index % 3
-        let brightnessDelta: CGFloat
-        let hueDelta: CGFloat
-        switch band {
-        case 1:
-            brightnessDelta = 0.09 + 0.035 * CGFloat(generation)
-            hueDelta = 0.018 + 0.012 * CGFloat(generation)
-        case 2:
-            brightnessDelta = -0.11 - 0.035 * CGFloat(generation)
-            hueDelta = -0.02 - 0.012 * CGFloat(generation)
-        default:
-            brightnessDelta = 0.04 * CGFloat(generation)
-            hueDelta = 0.03 * CGFloat(generation)
-        }
-
-        var shiftedHue = hue + hueDelta
-        shiftedHue = shiftedHue.truncatingRemainder(dividingBy: 1)
-        if shiftedHue < 0 { shiftedHue += 1 }
-        let shiftedBrightness = min(0.90, max(0.42, brightness + brightnessDelta))
-        let shiftedSaturation = min(0.85, max(0.50, saturation))
-        return NSColor(hue: shiftedHue, saturation: shiftedSaturation, brightness: shiftedBrightness, alpha: 1)
+        let steps: [CGFloat] = [0, 0.10, -0.10, 0.08, -0.12]
+        let adjusted = min(0.90, max(0.50, brightness + steps[index % steps.count]))
+        return NSColor(hue: hue, saturation: saturation, brightness: adjusted, alpha: 1)
     }
 
     private static func hashedColor(_ bundleID: String) -> NSColor {
@@ -154,5 +134,13 @@ extension NSColor {
         let green = CGFloat((value >> 8) & 0xFF) / 255
         let blue = CGFloat(value & 0xFF) / 255
         self.init(srgbRed: red, green: green, blue: blue, alpha: 1)
+    }
+
+    var hexRGB: String {
+        guard let rgb = usingColorSpace(.sRGB) else { return "#000000" }
+        let red = Int((rgb.redComponent * 255).rounded())
+        let green = Int((rgb.greenComponent * 255).rounded())
+        let blue = Int((rgb.blueComponent * 255).rounded())
+        return String(format: "#%02X%02X%02X", red, green, blue)
     }
 }

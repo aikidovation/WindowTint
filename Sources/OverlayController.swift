@@ -12,26 +12,18 @@ final class OverlayController {
     private var stableWork: DispatchWorkItem?
     private static let stableDelay: TimeInterval = 0.15
 
-    /// Drops every border. The next refresh creates new ones on the Space that is current then.
-    func hideAll() {
-        stableWork?.cancel()
-        stableWork = nil
-        for overlay in overlays.values { overlay.hide() }
-        overlays.removeAll()
-        previousBounds.removeAll()
-        lastMovedAt.removeAll()
-    }
-
-    /// Places borders for `windows` (front to back). Returns how many listed windows each pid owns,
-    /// including ones skipped for exclusion, so accessibility subscriptions can track opens and closes.
-    /// `windows` must already be the on-screen list for the current Space.
-    func refresh(windows: [WindowRecord], settings: Settings) -> [pid_t: Int] {
+    /// Places borders for on-screen windows and orders the others out without destroying them.
+    /// An overlay is created only when its target is on screen and its frame has settled, so the
+    /// first `order(.above, relativeTo:)` joins the target's Space. The same window is ordered
+    /// back in when that target returns.
+    func refresh(windows: [WindowRecord], settings: Settings, trigger: String) -> [pid_t: Int] {
         var counts: [pid_t: Int] = [:]
         for window in windows {
             counts[window.pid, default: 0] += 1
         }
         guard settings.isEnabled else {
-            removeAll()
+            orderOutAll()
+            log(trigger: trigger, windows: windows, rows: [])
             return counts
         }
         guard let primaryHeight = Self.primaryScreenHeight() else { return counts }
@@ -40,56 +32,66 @@ final class OverlayController {
         let borderWidth = settings.borderWidth
         let showsTint = settings.tintEnabled
         let now = Date()
-        var keep = Set<Int>()
+        let onScreen = Set(windows.map(\.windowNumber))
+        for (number, overlay) in overlays where !onScreen.contains(number) {
+            overlay.hide()
+        }
+
         var placed: [(number: Int, frame: NSRect, color: NSColor)] = []
+        var rows: [DebugLog.Row] = []
         var waitingForStable = false
 
         for window in windows {
             let app = NSRunningApplication(processIdentifier: window.pid)
-            if let bundleID = app?.bundleIdentifier, bundleID == Bundle.main.bundleIdentifier { continue }
-            if let bundleID = app?.bundleIdentifier, excluded.contains(bundleID) { continue }
-            let moving = previousBounds[window.windowNumber].map { Self.framesDiffer($0, window.bounds) } ?? false
+            let bundleID = app?.bundleIdentifier ?? "pid:\(window.pid)"
+            let skip = app?.bundleIdentifier == Bundle.main.bundleIdentifier
+                || (app?.bundleIdentifier).map { excluded.contains($0) } == true
+            let known = previousBounds[window.windowNumber]
+            // No stored frame means this window just appeared. Wait until the frame holds still
+            // so a Space animation cannot flash a border in the wrong place.
+            let moving = known.map { Self.framesDiffer($0, window.bounds) } ?? true
             previousBounds[window.windowNumber] = window.bounds
             if moving { lastMovedAt[window.windowNumber] = now }
-            let movedAt = lastMovedAt[window.windowNumber]
-            let unstable = movedAt.map { now.timeIntervalSince($0) < Self.stableDelay } ?? false
-            if moving || unstable {
-                overlays[window.windowNumber]?.hide()
-                if overlays[window.windowNumber] != nil { keep.insert(window.windowNumber) }
-                waitingForStable = true
-                continue
-            }
-            lastMovedAt.removeValue(forKey: window.windowNumber)
-            let frame = Self.cocoaFrame(fromQuartz: window.bounds, primaryHeight: primaryHeight)
-            let bundleID = app?.bundleIdentifier ?? "pid:\(window.pid)"
+            let unsettled = lastMovedAt[window.windowNumber].map { now.timeIntervalSince($0) < Self.stableDelay } ?? false
             let color = colors.color(
                 bundleID: bundleID,
                 windowNumber: window.windowNumber,
                 icon: app?.icon,
                 overrideHex: app?.bundleIdentifier.flatMap { settings.overrideHex(for: $0) }
             )
-            keep.insert(window.windowNumber)
+            if skip || moving || unsettled {
+                overlays[window.windowNumber]?.hide()
+                if !skip && (moving || unsettled) { waitingForStable = true }
+                rows.append(DebugLog.Row(
+                    windowID: window.windowNumber, pid: window.pid, bundleID: bundleID,
+                    frame: window.bounds, state: "hidden", color: color.hexRGB
+                ))
+                continue
+            }
+            lastMovedAt.removeValue(forKey: window.windowNumber)
+            let created = overlays[window.windowNumber] == nil
+            let frame = Self.cocoaFrame(fromQuartz: window.bounds, primaryHeight: primaryHeight)
             placed.append((window.windowNumber, frame, color))
+            rows.append(DebugLog.Row(
+                windowID: window.windowNumber, pid: window.pid, bundleID: bundleID,
+                frame: window.bounds, state: created ? "created" : "shown", color: color.hexRGB
+            ))
         }
 
-        let seen = Set(windows.map(\.windowNumber))
-        previousBounds = previousBounds.filter { seen.contains($0.key) }
-        lastMovedAt = lastMovedAt.filter { seen.contains($0.key) }
-
-        for number in Array(overlays.keys) where !keep.contains(number) {
-            overlays[number]?.hide()
-            overlays.removeValue(forKey: number)
-        }
-
-        // Back to front, so each border is ordered just above its own window and stays
-        // under windows that are already in front of it.
+        // Back to front, so each border is ordered just above its own window.
+        // That is the relationship Mission Control sometimes captures; every on-screen window gets it.
         for item in placed.reversed() {
             let overlay = overlays[item.number] ?? makeOverlay(number: item.number)
             overlay.update(frame: item.frame, color: item.color, borderWidth: borderWidth, showsTint: showsTint)
             overlay.orderAboveOwner()
         }
         if waitingForStable { armStabilityCheck() }
+        log(trigger: trigger, windows: windows, rows: rows)
         return counts
+    }
+
+    private func log(trigger: String, windows: [WindowRecord], rows: [DebugLog.Row]) {
+        DebugLog.write(trigger: trigger, onScreen: windows.count, rows: rows)
     }
 
     private func armStabilityCheck() {
@@ -107,8 +109,8 @@ final class OverlayController {
         return overlay
     }
 
-    private func removeAll() {
-        hideAll()
+    private func orderOutAll() {
+        for overlay in overlays.values { overlay.hide() }
     }
 
     private static func framesDiffer(_ a: CGRect, _ b: CGRect) -> Bool {
@@ -154,10 +156,10 @@ private final class Overlay {
         window.hasShadow = false
         window.ignoresMouseEvents = true
         window.level = .normal
-        // Not `.canJoinAllSpaces` or `.stationary`: those stay visible across Spaces while the
-        // windows slide away. `.transient` keeps the border on the Space where it was created.
+        // `.managed` stays on the Space where this window was first ordered in.
+        // `.transient` would follow the active Space and show up torn off from its window.
         // `.ignoresCycle` leaves it out of Cmd-`. `.fullScreenAuxiliary` shares a full-screen space.
-        window.collectionBehavior = [.ignoresCycle, .fullScreenAuxiliary, .transient]
+        window.collectionBehavior = [.managed, .ignoresCycle, .fullScreenAuxiliary]
         window.hidesOnDeactivate = false
         window.isExcludedFromWindowsMenu = true
         window.animationBehavior = .none

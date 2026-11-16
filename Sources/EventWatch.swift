@@ -4,9 +4,7 @@ import ApplicationServices
 /// Accessibility observers, workspace notifications, and a ~4 Hz timer. All of them
 /// schedule one coalesced refresh. Without Accessibility permission, only the timer runs.
 final class EventWatch {
-    var onRefresh: (() -> Void)?
-    /// Space switches are not a normal refresh. The app hides every border, then rebuilds after the animation settles.
-    var onSpaceChange: (() -> Void)?
+    var onRefresh: ((String) -> Void)?
     private var observers: [pid_t: AppAXObserver] = [:]
     private var timer: Timer?
     private var pending = false
@@ -31,7 +29,7 @@ final class EventWatch {
         for name in names {
             // The returned token is the observer. Releasing it removes the notification.
             let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                self?.schedule()
+                self?.schedule(name.rawValue)
             }
             notificationTokens.append(token)
         }
@@ -40,11 +38,11 @@ final class EventWatch {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.onSpaceChange?()
+            self?.onRefresh?("space")
         }
         notificationTokens.append(spaceToken)
         let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
-            self?.schedule()
+            self?.schedule("timer")
         }
         timer.tolerance = 0.05
         RunLoop.main.add(timer, forMode: .common)
@@ -79,14 +77,17 @@ final class EventWatch {
     }
 
     fileprivate static func scheduleFromObserver() {
-        current?.schedule()
+        current?.schedule("accessibility")
     }
 
-    private func schedule() {
+    private var pendingReason = "timer"
+
+    private func schedule(_ reason: String) {
         if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in self?.schedule() }
+            DispatchQueue.main.async { [weak self] in self?.schedule(reason) }
             return
         }
+        pendingReason = reason
         guard !pending else { return }
         pending = true
         let delay = max(0, lastRefresh.addingTimeInterval(0.05).timeIntervalSinceNow)
@@ -94,8 +95,9 @@ final class EventWatch {
             guard let self else { return }
             self.pending = false
             self.lastRefresh = Date()
+            let reason = self.pendingReason
             self.syncObservers()
-            self.onRefresh?()
+            self.onRefresh?(reason)
         }
     }
 
